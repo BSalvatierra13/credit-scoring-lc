@@ -75,7 +75,7 @@ if "model" not in st.session_state:
     st.info("Click **Download & Load model** to initialize.")
     if st.button("Download & Load model", type="primary"):
         try:
-            st.session_state.model = load_model_from_github_release(OWNER, REPO, TAG, token)
+            st.session_state.model = load_model_from_github_release(OWNER, REPO, TAG)
             st.success("Model loaded")
             st.rerun()
         except Exception as e:
