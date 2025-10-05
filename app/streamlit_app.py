@@ -55,67 +55,65 @@ DF_BINS = _safe_read_csv(
 
 # ---------------------------- MODEL LOADER ----------------------------
 @st.cache_resource(show_spinner=False)
-def load_model_from_github_release(owner: str, repo: str, tag: str, token: str | None = None):
+def load_model_from_github_release(owner: str, repo: str, tag: str, asset_name: str = "model.joblib"):
     """
-    Descarga el .joblib desde la Release pública de GitHub (sin token por defecto).
-    Si se pasa token, lo usa para evitar rate-limit.
+    Descarga el .joblib desde una Release pública de GitHub sin requerir token.
+    1) Intenta la API (para descubrir el nombre exacto del asset si no lo sabes).
+    2) Si hay rate limit / error, intenta descarga directa usando la URL de release/download.
     """
+    import traceback
+
+    # --- helper de descarga ---
+    def _download(url: str, fname: str):
+        tmp_path = fname + ".part"
+        with requests.get(url, stream=True, timeout=120) as dl:
+            dl.raise_for_status()
+            total = int(dl.headers.get("Content-Length", 0))
+            done = 0
+            chunk = 1024 * 1024
+            prog = st.progress(0.0)
+            with open(tmp_path, "wb") as f, st.spinner(f"Descargando {fname}…"):
+                for data in dl.iter_content(chunk_size=chunk):
+                    if not data:
+                        continue
+                    f.write(data)
+                    done += len(data)
+                    if total:
+                        prog.progress(min(done / total, 1.0))
+        os.replace(tmp_path, fname)
+        return fname, done
+
+    # 1) Intento vía API (descubrir asset exacto)
     api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}"
-
-    # headers para API: solo agregamos Authorization si hay token
-    api_headers = {"Accept": "application/vnd.github+json"}
-    if token:
-        api_headers["Authorization"] = f"Bearer {token}"
-
-    r = requests.get(api_url, headers=api_headers, timeout=60)
-    # Mensaje más claro si te pega el rate limit
-    if r.status_code == 403 and "rate limit" in r.text.lower():
-        raise RuntimeError(
-            "GitHub API rate limit excedido (sin token). "
-            "Esperá un rato o agregá un token en st.secrets['github_token']."
-        )
-    r.raise_for_status()
-    rel = r.json()
-
-    assets = rel.get("assets", [])
-    joblib_assets = [a for a in assets if a.get("name", "").lower().endswith(".joblib")]
-    if not joblib_assets:
-        names = [a.get("name", "(sin nombre)") for a in assets]
-        raise RuntimeError(
-            "No encontré ningún asset .joblib en la Release.\n"
-            f"Assets disponibles: {names}"
-        )
-
-    asset = joblib_assets[0]
-    url = asset.get("browser_download_url")
-    fname = asset.get("name", "model.joblib")
-
-    # headers para descarga del asset: también opcionales
-    dl_headers = {}
-    if token:
-        dl_headers["Authorization"] = f"Bearer {token}"
-
-    # Descarga con progreso
-    tmp_path = fname + ".part"
-    with requests.get(url, headers=dl_headers, stream=True, timeout=600) as dl:
-        dl.raise_for_status()
-        total = int(dl.headers.get("Content-Length", 0))
-        done = 0
-        chunk = 1024 * 1024
-
-        prog = st.progress(0.0)
-        with open(tmp_path, "wb") as f, st.spinner(f"Descargando {fname}…"):
-            for data in dl.iter_content(chunk_size=chunk):
-                if not data:
-                    continue
-                f.write(data)
-                done += len(data)
-                if total:
-                    prog.progress(min(done / total, 1.0))
-
-    os.replace(tmp_path, fname)
-    st.success(f"Descargado: {fname} ({done/1024/1024:.1f} MB)")
-    return joblib.load(fname)
+    try:
+        r = requests.get(api_url, headers={"Accept": "application/vnd.github+json"}, timeout=20)
+        if r.status_code == 403 and "rate limit" in r.text.lower():
+            raise RuntimeError("GitHub API rate limit")
+        r.raise_for_status()
+        rel = r.json()
+        assets = rel.get("assets", [])
+        joblib_assets = [a for a in assets if a.get("name", "").lower().endswith(".joblib")]
+        if joblib_assets:
+            asset = joblib_assets[0]
+            url = asset.get("browser_download_url")
+            fname = asset.get("name", asset_name)
+            path, done = _download(url, fname)
+            st.success(f"Descargado: {fname} ({done/1024/1024:.1f} MB)")
+            return joblib.load(path)
+        else:
+            # no assets detectados por API -> intento directo
+            raise RuntimeError("No .joblib in API assets")
+    except Exception:
+        # 2) Fallback: URL directa (no usa API, evita rate limit)
+        direct_url = f"https://github.com/{owner}/{repo}/releases/download/{tag}/{asset_name}"
+        try:
+            path, done = _download(direct_url, asset_name)
+            st.success(f"Descargado (fallback): {asset_name} ({done/1024/1024:.1f} MB)")
+            return joblib.load(path)
+        except Exception as e:
+            st.error("No pude descargar el modelo ni por API ni por fallback.")
+            st.code("".join(traceback.format_exc()))
+            raise
 
 st.title("Credit Scoring — modelo cargado desde Release")
 
