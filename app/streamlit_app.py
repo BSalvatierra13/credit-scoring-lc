@@ -8,28 +8,72 @@ from datetime import date
 from pathlib import Path
 
 # ---------------------------- CONFIG ---------------------------------
+# ---------------------------- CONFIG ---------------------------------
 OWNER = "BSalvatierra13"
 REPO  = "credit-scoring-lc"
 TAG   = "v1.0.0"
 
 st.set_page_config(page_title="Credit Scoring — Release", layout="wide")
 
-# Rutas de datos auxiliares (CSV con promedios y bins)
+# --------------------- AUX DATA (CSV con fallback) -------------------
 DATA_DIR = Path(__file__).parent  # carpeta donde está tu script
-DF_GRADE = pd.read_csv(DATA_DIR / "grade_avg_int_rate.csv")     # cols: grade, avg_int_rate (fracción)
-DF_BINS  = pd.read_csv(DATA_DIR / "interest_rate_bins.csv")     # cols: bin, left, right
+
+def _safe_read_csv(path: Path, required_cols: list[str], fallback_df: pd.DataFrame, name: str) -> pd.DataFrame:
+    try:
+        df = pd.read_csv(path)
+        # chequeo de columnas mínimas
+        missing = [c for c in required_cols if c not in df.columns]
+        if missing:
+            st.warning(f"CSV '{name}' no tiene columnas {missing}. Uso valores por defecto.")
+            return fallback_df
+        return df
+    except FileNotFoundError:
+        st.warning(f"CSV '{name}' no encontrado en {path}. Uso valores por defecto.")
+        return fallback_df
+    except Exception as e:
+        st.warning(f"No pude leer '{name}': {e}. Uso valores por defecto.")
+        return fallback_df
+
+# Fallbacks muy simples por si faltan los archivos
+DF_GRADE = _safe_read_csv(
+    DATA_DIR / "grade_avg_int_rate.csv",
+    required_cols=["grade", "avg_int_rate"],
+    fallback_df=pd.DataFrame({"grade": list("ABCDEFG"), "avg_int_rate": [0.10,0.12,0.14,0.16,0.18,0.20,0.22]}),
+    name="grade_avg_int_rate.csv"
+)
+
+DF_BINS = _safe_read_csv(
+    DATA_DIR / "interest_rate_bins.csv",
+    required_cols=["bin", "left", "right"],
+    fallback_df=pd.DataFrame({
+        "bin":   [0,1,2,3],
+        "left":  [0.00, 0.10, 0.15, 0.20],
+        "right": [0.10, 0.15, 0.20, 0.30]
+    }),
+    name="interest_rate_bins.csv"
+)
 
 # ---------------------------- MODEL LOADER ----------------------------
 @st.cache_resource(show_spinner=False)
-def load_model_from_github_release(owner: str, repo: str, tag: str):
+def load_model_from_github_release(owner: str, repo: str, tag: str, token: str | None = None):
     """
-    1) Llama a la API pública de GitHub para obtener la Release por TAG.
-    2) Busca el primer asset que termine en .joblib.
-    3) Lo descarga por streaming (barra de progreso) y lo guarda en disco.
-    4) Lo carga con joblib y devuelve el objeto (tu Pipeline).
+    Descarga el .joblib desde la Release pública de GitHub (sin token por defecto).
+    Si se pasa token, lo usa para evitar rate-limit.
     """
     api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}"
-    r = requests.get(api_url, timeout=60)
+
+    # headers para API: solo agregamos Authorization si hay token
+    api_headers = {"Accept": "application/vnd.github+json"}
+    if token:
+        api_headers["Authorization"] = f"Bearer {token}"
+
+    r = requests.get(api_url, headers=api_headers, timeout=60)
+    # Mensaje más claro si te pega el rate limit
+    if r.status_code == 403 and "rate limit" in r.text.lower():
+        raise RuntimeError(
+            "GitHub API rate limit excedido (sin token). "
+            "Esperá un rato o agregá un token en st.secrets['github_token']."
+        )
     r.raise_for_status()
     rel = r.json()
 
@@ -46,9 +90,14 @@ def load_model_from_github_release(owner: str, repo: str, tag: str):
     url = asset.get("browser_download_url")
     fname = asset.get("name", "model.joblib")
 
+    # headers para descarga del asset: también opcionales
+    dl_headers = {}
+    if token:
+        dl_headers["Authorization"] = f"Bearer {token}"
+
     # Descarga con progreso
     tmp_path = fname + ".part"
-    with requests.get(url, stream=True, timeout=600) as dl:
+    with requests.get(url, headers=dl_headers, stream=True, timeout=600) as dl:
         dl.raise_for_status()
         total = int(dl.headers.get("Content-Length", 0))
         done = 0
@@ -68,13 +117,13 @@ def load_model_from_github_release(owner: str, repo: str, tag: str):
     st.success(f"Descargado: {fname} ({done/1024/1024:.1f} MB)")
     return joblib.load(fname)
 
-# --- NO cargar en el arranque ---
 st.title("Credit Scoring — modelo cargado desde Release")
 
 if "model" not in st.session_state:
     st.info("Click **Download & Load model** to initialize.")
     if st.button("Download & Load model", type="primary"):
         try:
+            # SIN token:
             st.session_state.model = load_model_from_github_release(OWNER, REPO, TAG)
             st.success("Model loaded")
             st.rerun()
@@ -84,6 +133,8 @@ if "model" not in st.session_state:
 else:
     model = st.session_state.model
     st.success("Model ready")
+
+
 # ---------------------------- FE HELPERS ------------------------------
 def _parse_rate_series(s: pd.Series) -> pd.Series:
     """
