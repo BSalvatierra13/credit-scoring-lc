@@ -68,10 +68,22 @@ def load_model_from_github_release(owner: str, repo: str, tag: str):
     st.success(f"Descargado: {fname} ({done/1024/1024:.1f} MB)")
     return joblib.load(fname)
 
-model = load_model_from_github_release(OWNER, REPO, TAG)
-
+# --- NO cargar en el arranque ---
 st.title("Credit Scoring — modelo cargado desde Release")
 
+if "model" not in st.session_state:
+    st.info("Click **Download & Load model** to initialize.")
+    if st.button("Download & Load model", type="primary"):
+        try:
+            st.session_state.model = load_model_from_github_release(OWNER, REPO, TAG, token)
+            st.success("Model loaded")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to download/load model: {e}")
+            st.stop()
+else:
+    model = st.session_state.model
+    st.success("Model ready")
 # ---------------------------- FE HELPERS ------------------------------
 def _parse_rate_series(s: pd.Series) -> pd.Series:
     """
