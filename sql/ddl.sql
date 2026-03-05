@@ -61,7 +61,7 @@ typed AS (
            sub_grade,
            -- CORRECCIÓN OBLIGATORIA: Forzamos tipo INTEGER, usamos NULL en vez de 'Unknown'
            CASE 
-               WHEN emp_length IS NULL THEN NULL 
+               WHEN emp_length IS NULL THEN NULL
                WHEN emp_length LIKE '%10+' THEN 10
                WHEN emp_length LIKE '%< 1' THEN 0
                ELSE REGEXP_REPLACE(emp_length, '[^0-9]', '', 'g')::INTEGER
@@ -135,6 +135,7 @@ final AS (
         annual_inc IS NOT NULL AND
         earliest_cr_line_year IS NOT NULL AND
         open_acc IS NOT NULL AND
+        emp_length_years IS NOT NULL AND
         -- TUS NUEVAS REGLAS DE FILTRADO:
         dti >= 0 AND 
         annual_inc <= inc_p999
